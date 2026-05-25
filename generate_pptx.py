@@ -39,9 +39,6 @@ SCALE_BACK = 0.82              # multiply per step backward (older = smaller)
 LINE_GAP_CM = 0.35             # vertical gap between lines in same phase
 TEXT_BOX_W_CM = 26.0           # wide enough to never wrap a single line
 
-# For rotated columns: how far each column is from the slide edge
-# (column width = text-box HEIGHT at that font size)
-ROTATED_GAP_CM = 0.0           # extra gap between successive rotated columns
 
 
 def cm(v): return Cm(v)
@@ -192,44 +189,12 @@ def pptx_rot(deg):
     return int(deg % 360)
 
 
-def place_rotated_column(slide, entry, col_visual_center_x_cm, col_visual_center_y_cm,
-                          rotation_deg, default_font, default_color_hex):
-    """
-    Place a completed-phase line as a rotated text column.
-
-    After rotation:
-      - 270° (left): box W×H becomes a tall column H wide, W tall
-      - 90° (right):  same physical swap
-
-    We want the column's visual center at (cx, cy).
-    For rotation R, in PPTX the shape's (left,top,w,h) are in the UNROTATED frame:
-        visual_cx = left + w/2
-        visual_cy = top  + h/2
-    (center doesn't change with rotation)
-    So: left = cx - w/2,  top = cy - h/2
-    """
-    font_size_pt  = entry['font_size_pt']
-    text          = entry['text']
-    h_cm          = line_height_cm(font_size_pt)   # unrotated height
-    w_cm          = TEXT_BOX_W_CM                  # unrotated width
-
-    # The column "thickness" in slide space = h_cm (unrotated height)
-    # Place box center at (col_visual_center_x_cm, col_visual_center_y_cm)
-    left_cm = col_visual_center_x_cm - w_cm / 2.0
-    top_cm  = col_visual_center_y_cm - h_cm / 2.0
-
-    rot_pptx = pptx_rot(rotation_deg)
-    add_textbox(slide, text, default_font, default_color_hex, font_size_pt,
-                left_cm, top_cm, w_cm, h_cm, rotation_deg=rot_pptx)
-
-
 def generate_slide(prs, slide_entries, current_phase_idx, last_trans_dir,
                    bg_image_path, blur_radius, default_font, default_color_hex):
     """
     slide_entries : list of entry dicts, oldest → newest.
     current_phase_idx : phase_idx of the currently active phase.
-    last_trans_dir : 'left' | 'right' | 'none'  — direction of the most recent
-                     phase transition; determines which side old phases appear on.
+    last_trans_dir : 'left' | 'right' | 'none'
     """
     slide_layout = prs.slide_layouts[6]  # blank
     slide = prs.slides.add_slide(slide_layout)
@@ -250,71 +215,75 @@ def generate_slide(prs, slide_entries, current_phase_idx, last_trans_dir,
                     LEFT_MARGIN_CM, top_cm, TEXT_BOX_W_CM, h)
         y_bottom = top_cm - LINE_GAP_CM
 
-    # ── Old phases: rotated columns or horizontal text, off-slide ────────────
+    # ── Old phases: packed outward from the slide edge ────────────────────────
     if not old:
         return slide
 
-    # Group by phase_idx, sort newest-phase-first (closest to active area)
     phase_groups = {}
     for e in old:
         phase_groups.setdefault(e['phase_idx'], []).append(e)
 
     side = last_trans_dir   # 'left' or 'right'
+    cy   = SLIDE_H_CM / 2.0  # vertical centre for all rotated columns
 
-    # We'll lay bands out from the slide edge outward.
-    # band_offset: how far from the slide edge the current band starts (in cm).
-    band_offset = 0.0
+    # inner_limit: x-coordinate of the current packing boundary.
+    # Left side: starts at 0 (slide left edge), moves more negative with each band.
+    # Right side: starts at SLIDE_W_CM (slide right edge), moves more positive.
+    inner_limit = 0.0 if side == 'left' else SLIDE_W_CM
 
-    # Process phases nearest → furthest (highest phase_idx → lowest)
+    # Process phases nearest → furthest (highest phase_idx first)
     for pi in sorted(phase_groups.keys(), reverse=True):
-        group = phase_groups[pi]
-        rot   = group[0]['phase_rotation']  # all entries share same rotation
-        cy    = SLIDE_H_CM / 2.0            # vertical center = slide centre
-
+        group    = phase_groups[pi]
+        rot      = group[0]['phase_rotation']
         rot_norm = rot % 360
 
         if rot_norm in (90, 270):
-            # ── Rotated ±90°: each line is a vertical column ──────────────
-            # column visual thickness = line's text-box height (unrotated h)
-            # newest line closest to slide edge
-
-            col_offset = band_offset   # running position within this band
+            # ── Rotated ±90°: each line becomes a vertical column ──────────
+            # Newest line is closest to the slide edge.
+            # All columns are centred at cy = SLIDE_H/2.
+            # Column visual thickness in the side direction = unrotated height h.
             for entry in reversed(group):   # newest first
-                col_h = line_height_cm(entry['font_size_pt'])
+                col_h    = line_height_cm(entry['font_size_pt'])
+                rot_pptx = pptx_rot(rot)
+
                 if side == 'left':
-                    # right edge of column = -(col_offset)
-                    cx = -(col_offset + col_h / 2.0)
-                else:  # right
-                    cx = SLIDE_W_CM + col_offset + col_h / 2.0
+                    # Visual right edge of this column = inner_limit
+                    center_x    = inner_limit - col_h / 2.0
+                    inner_limit -= col_h
+                else:
+                    # Visual left edge of this column = inner_limit
+                    center_x    = inner_limit + col_h / 2.0
+                    inner_limit += col_h
 
-                place_rotated_column(slide, entry, cx, cy, rot,
-                                     default_font, default_color_hex)
-                col_offset += col_h + ROTATED_GAP_CM
-
-            band_width = col_offset - band_offset
+                # In PPTX rotation is around the box centre, so:
+                # box_left = center_x - w/2,  box_top = cy - col_h/2
+                left_cm = center_x - TEXT_BOX_W_CM / 2.0
+                top_cm  = cy - col_h / 2.0
+                add_textbox(slide, entry['text'], default_font, default_color_hex,
+                            entry['font_size_pt'],
+                            left_cm, top_cm, TEXT_BOX_W_CM, col_h,
+                            rotation_deg=rot_pptx)
 
         else:
-            # ── Rotation 0° or 180°: lines are horizontal again ───────────
-            # Stack them like active-phase lines but far off-slide.
-            # Anchor bottom at BOTTOM_ANCHOR_CM, and shift horizontally by band.
+            # ── Rotation 0° or 180°: horizontal, stacked like active phase ─
+            # Vertical layout: same BOTTOM_ANCHOR, same gaps.
             y_b = BOTTOM_ANCHOR_CM
             for entry in reversed(group):   # newest first
                 h      = line_height_cm(entry['font_size_pt'])
                 top_cm = y_b - h
                 if side == 'left':
-                    # position to the left: right edge at -(band_offset)
-                    left_cm = -(band_offset + TEXT_BOX_W_CM)
+                    left_cm      = inner_limit - TEXT_BOX_W_CM
                 else:
-                    left_cm = SLIDE_W_CM + band_offset
+                    left_cm      = inner_limit
                 add_textbox(slide, entry['text'], default_font, default_color_hex,
                             entry['font_size_pt'],
                             left_cm, top_cm, TEXT_BOX_W_CM, h)
                 y_b = top_cm - LINE_GAP_CM
 
-            # For horizontal bands, width = TEXT_BOX_W_CM
-            band_width = TEXT_BOX_W_CM
-
-        band_offset += band_width + ROTATED_GAP_CM
+            if side == 'left':
+                inner_limit -= TEXT_BOX_W_CM
+            else:
+                inner_limit += TEXT_BOX_W_CM
 
     return slide
 
