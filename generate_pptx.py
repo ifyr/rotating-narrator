@@ -195,13 +195,32 @@ def _next_id():
     return _ANIM_ID[0]
 
 
-# Translate old Chinese direction words to canonical English params
+# Translate Chinese parameter words to canonical English params
 _ZH_PARAM = {
-    '向左': 'left', '向右': 'right', '向上': 'up', '向下': 'down',
+    # direction
+    '向左': 'left',  '向右': 'right', '向上': 'up',  '向下': 'down',
+    # orientation
     '横向': 'horizontal', '纵向': 'vertical',
-    '向内': 'in', '向外': 'out',
+    # size
+    '向内': 'in',   '向外': 'out',
+    # across (checkerboard, stretch)
+    '交叉': 'across',
+    # split (劈裂): short forms added by user
+    '横外': 'h-out', '横内': 'h-in', '纵外': 'v-out', '纵内': 'v-in',
+    # split: legacy long forms
     '水平向外': 'h-out', '水平向内': 'h-in',
     '垂直向外': 'v-out', '垂直向内': 'v-in',
+}
+
+# Diagonal params differ by context:
+# fly uses "bottom-left" etc., stairs/strips use "left-down" etc.
+_ZH_DIAG_FLY = {
+    '左下': 'bottom-left', '右下': 'bottom-right',
+    '左上': 'top-left',    '右上': 'top-right',
+}
+_ZH_DIAG_STAIR = {
+    '左下': 'left-down',  '右下': 'right-down',
+    '左上': 'left-up',    '右上': 'right-up',
 }
 
 # Translate old Chinese effect names to canonical English names
@@ -283,32 +302,39 @@ def _camel(s):
 
 def _resolve_anim(spec):
     """
-    Parse animation spec (English canonical or legacy Chinese) and return
-    (filter_str, dur_ms).  filter_str=None → appear-only, no filter element.
+    Parse animation spec and return (filter_str, dur_ms).
+    Accepts English canonical ("fly,left"), Chinese effect + English param
+    ("飞入,left"), or fully Chinese ("飞入,向左" / "飞入,左下").
+    filter_str=None → appear-only (no animEffect element).
     """
     parts = [p.strip() for p in spec.split(',')]
-
-    # Translate legacy Chinese name → canonical English
     raw_name  = parts[0]
     raw_param = parts[1] if len(parts) > 1 else ''
-    name  = _ZH_NAME.get(raw_name, raw_name).lower()
-    param = _ZH_PARAM.get(raw_param, raw_param).lower()
 
-    # fly is a special case (wipe proxy)
+    name = _ZH_NAME.get(raw_name, raw_name).lower()
+
+    # fly: Chinese diagonal params differ from stairs/strips
     if name == 'fly':
-        d = _FLY_WIPE.get(param or 'left', 'right')
+        param = (_ZH_DIAG_FLY.get(raw_param)
+                 or _ZH_PARAM.get(raw_param)
+                 or raw_param or 'left').lower()
+        d = _FLY_WIPE.get(param, 'right')
         return f'wipe({d})', 400
+
+    # stairs / strips: Chinese diagonal maps to left-down etc.
+    if name in ('stairs', 'strips'):
+        param = (_ZH_DIAG_STAIR.get(raw_param)
+                 or _ZH_PARAM.get(raw_param)
+                 or raw_param or 'left-down').lower()
+        return f'{name}({_camel(param)})', 500
 
     # split → barn filter
     if name == 'split':
-        p = param or 'h-out'
-        return _SPLIT_FILTER.get(p, 'barn(inHorizontal)'), 500
+        param = _ZH_PARAM.get(raw_param, raw_param) or 'h-out'
+        return _SPLIT_FILTER.get(param, 'barn(inHorizontal)'), 500
 
-    # stairs / strips → parameterised filter
-    if name in ('stairs', 'strips'):
-        p = _camel(param or 'left-down')
-        return f'{name}({p})', 500
-
+    # all other effects: generic param lookup
+    param = _ZH_PARAM.get(raw_param, raw_param).lower()
     entry = _EFFECT.get(name, (None, '', 0))
     tmpl, default, dur = entry
     if tmpl is None:
