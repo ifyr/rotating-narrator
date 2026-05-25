@@ -188,47 +188,144 @@ def add_textbox(slide, text, default_font, default_color_hex, font_size_pt,
 # ---------------------------------------------------------------------------
 # Entrance animation
 # ---------------------------------------------------------------------------
-_ANIM_ID = [0]   # mutable counter for unique XML IDs per process
+_ANIM_ID = [0]
 
 def _next_id():
     _ANIM_ID[0] += 1
     return _ANIM_ID[0]
 
 
-def _anim_params(anim_str):
+# Translate old Chinese direction words to canonical English params
+_ZH_PARAM = {
+    '向左': 'left', '向右': 'right', '向上': 'up', '向下': 'down',
+    '横向': 'horizontal', '纵向': 'vertical',
+    '向内': 'in', '向外': 'out',
+    '水平向外': 'h-out', '水平向内': 'h-in',
+    '垂直向外': 'v-out', '垂直向内': 'v-in',
+}
+
+# Translate old Chinese effect names to canonical English names
+_ZH_NAME = {
+    '百叶窗': 'blinds',     '出现': 'appear',      '盒状': 'box',
+    '菱形': 'diamond',      '劈裂': 'split',        '切入': 'strips',
+    '随机线条': 'random-bars', '楔入': 'wedge',      '擦除': 'wipe',
+    '飞入': 'fly',          '阶梯状': 'stairs',     '轮子': 'wheel',
+    '棋盘': 'checkerboard', '十字形扩展': 'plus',   '向内溶解': 'dissolve',
+    '圆形扩展': 'circle',   '淡化': 'fade',         '旋转': 'spin',
+    '缩放': 'zoom',         '展开': 'expand',       '翻转式由远及近': 'flip',
+    '基本缩放': 'zoom-basic', '伸展': 'stretch',    '下浮': 'float-down',
+    '回旋': 'swivel',       '上浮': 'float-up',     '升起': 'rise',
+    '压缩': 'compress',     '中心旋转': 'center-revolve', '弹跳': 'bounce',
+    '飞旋': 'pinwheel',     '挥鞭式': 'whip',       '空翻': 'somersault',
+    '曲线向上': 'curve-up', '掉落': 'drop',         '浮动': 'float',
+    '基本旋转': 'spin-basic', '螺旋飞入': 'spiral', '玩具风车': 'windmill',
+    '字幕式': 'credits',
+}
+
+# canonical effect name → (filter_template, default_param, dur_ms)
+# {} in template is replaced by param; None means appear-only (no filter)
+_EFFECT = {
+    'appear':         (None,                    '',            0),
+    'blinds':         ('blinds({})',             'horizontal',  500),
+    'bounce':         (None,                    '',            0),
+    'box':            ('box({})',                'in',          500),
+    'center-revolve': (None,                    '',            0),
+    'checkerboard':   ('checkboard({})',         'across',      500),
+    'circle':         ('circle({})',             'in',          500),
+    'compress':       ('stretch(across)',        '',            400),
+    'credits':        ('stretch(down)',          '',            600),
+    'curve-up':       (None,                    '',            0),
+    'diamond':        ('diamond({})',            'in',          500),
+    'dissolve':       ('dissolve',               '',            500),
+    'drop':           (None,                    '',            0),
+    'expand':         ('stretch(across)',        '',            500),
+    'fade':           (None,                    '',            400),
+    'flip':           (None,                    '',            0),
+    'float':          (None,                    '',            0),
+    'float-down':     (None,                    '',            0),
+    'float-up':       (None,                    '',            0),
+    'pinwheel':       ('wheel(1)',               '',            600),
+    'plus':           ('plus({})',               'in',          500),
+    'random-bars':    ('randombar({})',          'horizontal',  500),
+    'rise':           (None,                    '',            0),
+    'somersault':     (None,                    '',            0),
+    'spin':           ('wheel(1)',               '',            600),
+    'spin-basic':     (None,                    '',            0),
+    'spiral':         (None,                    '',            0),
+    'swivel':         (None,                    '',            0),
+    'wedge':          ('wedge',                  '',            500),
+    'wheel':          ('wheel({})',              '1',           600),
+    'whip':           (None,                    '',            0),
+    'windmill':       ('wheel(3)',               '',            600),
+    'wipe':           ('wipe({})',               'left',        400),
+    'zoom':           (None,                    '',            0),
+    'zoom-basic':     (None,                    '',            0),
+}
+
+# fly direction → wipe direction (fly enters FROM the opposite side)
+_FLY_WIPE = {
+    'left': 'right', 'right': 'left', 'up': 'down', 'down': 'up',
+    'bottom-left': 'right', 'bottom-right': 'left',
+    'top-left': 'right',   'top-right': 'left',
+}
+
+# split param → barn filter
+_SPLIT_FILTER = {
+    'h-out': 'barn(inHorizontal)', 'h-in': 'barn(outHorizontal)',
+    'v-out': 'barn(inVertical)',   'v-in': 'barn(outVertical)',
+}
+
+# stairs/strips param → camelCase for filter
+def _camel(s):
+    parts = s.split('-')
+    return parts[0] + ''.join(p.capitalize() for p in parts[1:])
+
+
+def _resolve_anim(spec):
     """
-    Return (filter_str, preset_id, dur_ms) from the SRT animation label.
-    filter_str=None means "Appear" (set-visibility only, no filter).
+    Parse animation spec (English canonical or legacy Chinese) and return
+    (filter_str, dur_ms).  filter_str=None → appear-only, no filter element.
     """
-    if '百叶窗' in anim_str:
-        return 'blinds(horizontal)', 12, 500
-    if '楔入' in anim_str:
-        return 'wedge', 36, 500
-    if '展开' in anim_str:
-        return 'stretch(across)', 21, 500
-    if '飞入' in anim_str:
-        # Use a box-wipe as a reasonable proxy for fly-in
-        if '向左' in anim_str:
-            return 'wipe(right)',  27, 400
-        if '向右' in anim_str:
-            return 'wipe(left)',   27, 400
-        if '向上' in anim_str:
-            return 'wipe(down)',   27, 400
-        if '向下' in anim_str:
-            return 'wipe(up)',     27, 400
-        return 'wipe(right)', 27, 400
-    if '旋转' in anim_str:
-        return 'wheel(1)', 40, 600
-    # 出现 / fallback
-    return None, 1, 0
+    parts = [p.strip() for p in spec.split(',')]
+
+    # Translate legacy Chinese name → canonical English
+    raw_name  = parts[0]
+    raw_param = parts[1] if len(parts) > 1 else ''
+    name  = _ZH_NAME.get(raw_name, raw_name).lower()
+    param = _ZH_PARAM.get(raw_param, raw_param).lower()
+
+    # fly is a special case (wipe proxy)
+    if name == 'fly':
+        d = _FLY_WIPE.get(param or 'left', 'right')
+        return f'wipe({d})', 400
+
+    # split → barn filter
+    if name == 'split':
+        p = param or 'h-out'
+        return _SPLIT_FILTER.get(p, 'barn(inHorizontal)'), 500
+
+    # stairs / strips → parameterised filter
+    if name in ('stairs', 'strips'):
+        p = _camel(param or 'left-down')
+        return f'{name}({p})', 500
+
+    entry = _EFFECT.get(name, (None, '', 0))
+    tmpl, default, dur = entry
+    if tmpl is None:
+        return None, dur
+    p = param or default
+    return (tmpl.format(p) if '{}' in tmpl else tmpl), dur
 
 
 def add_entrance_animation(slide, shape, anim_str):
     """
-    Append a p:timing element to the slide that plays the entrance animation
-    automatically when the slide is displayed.
+    Append a p:timing element to the slide that auto-plays the entrance
+    animation when the slide is displayed.
+    Accepts both new English canonical format ("fly,left") and legacy
+    Chinese format ("飞入,向左").
     """
-    filter_str, preset_id, dur_ms = _anim_params(anim_str)
+    filter_str, dur_ms = _resolve_anim(anim_str)
+    preset_id = 1   # Appear preset; filter overrides the visual effect
     spid = str(shape.shape_id)
 
     i1, i2, i3, i4, i5, i6, i7 = [_next_id() for _ in range(7)]
